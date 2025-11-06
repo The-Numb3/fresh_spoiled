@@ -1,0 +1,51 @@
+seed: 42
+
+data:
+  root_dir: "./MeatScan_Dataset"
+  train_csv: "./splits/train.csv"
+  val_csv:   "./splits/val.csv"
+  test_csv:  "./splits/test.csv"
+  img_size: 224
+  batch_size: 64
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+augment:
+  mode: "standard"   # "standard" | "paper"
+  color_jitter: [0.2, 0.2, 0.2, 0.05]
+
+model:
+  name: "mobilenetv2"
+  pretrained: true
+  num_classes: 2
+  dropout: 0.2
+
+train:
+  epochs: 30
+  criterion: "cross_entropy"  # "cross_entropy" | "bce_logits"
+  optimizer:
+    name: "adam"
+    lr: 0.0001
+    weight_decay: 0.0001
+  scheduler:
+    name: "cosine"   # "none" | "cosine"
+    warmup_epochs: 0
+  label_smoothing: 0.0
+  mixed_precision: true
+  out_dir: "./runs/meatscan_mbv2"
+
+  # Early Stopping & Best Model
+  save_best_by: "f1"    # 저장 기준
+  early_stopping:
+    enabled: true
+    monitor: "f1"       # "f1" | "pr_auc" | "loss"
+    mode: "max"
+    patience: 5
+    min_delta: 0.001
+
+eval:
+  # val에서 최적 threshold 찾고(test에 고정 적용)
+  optimize_threshold_on: "val"  # "val" | "none"
+  default_threshold: 0.5
