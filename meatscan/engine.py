@@ -29,26 +29,48 @@ def train_one_epoch(model, loader, optimizer, device, criterion, scaler=None):
     return total / len(loader.dataset)
 
 @torch.no_grad()
-def evaluate(model, loader, device, criterion, return_arrays=False):
+def evaluate(model, loader, device, criterion):
+    """
+    - 로짓의 shape로 binary(2-class) vs multiclass 자동 판별.
+    - 반환: (metrics_dict, probs_array, labels_array)
+      * binary: probs shape (N,)
+      * multiclass: probs shape (N, C)
+    """
     model.eval()
-    total = 0.0
-    probs_all, labels_all = [], []
+    total_loss = 0.0
+    all_probs = []
+    all_labels = []
 
-    for imgs, labels, _ in tqdm(loader, desc="eval", leave=False):
+    for imgs, labels, _ in tqdm(loader, desc="valid", leave=False):
         imgs = imgs.to(device, non_blocking=True)
         labels = labels.to(device)
+
         logits = model(imgs)
         loss = criterion(logits, labels)
-        total += loss.item() * imgs.size(0)
-        probs = torch.softmax(logits, dim=1)[:,1]
-        probs_all.append(probs.detach().cpu().numpy())
-        labels_all.append(labels.detach().cpu().numpy())
+        total_loss += loss.item() * imgs.size(0)
 
-    probs_all = np.concatenate(probs_all)
-    labels_all = np.concatenate(labels_all)
-    mets = compute_metrics(labels_all, probs_all)  # threshold는 main에서 결정해 재계산 가능
-    mets["loss"] = total / len(loader.dataset)
+        # 클래스 수 자동 추론
+        if logits.ndim >= 2:
+            C = logits.shape[-1]
+        else:
+            C = 1
 
-    if return_arrays:
-        return mets, probs_all, labels_all
-    return mets
+        if C == 2:
+            probs = torch.softmax(logits, dim=1)[:, 1]  # (N,)
+            all_probs.append(probs.detach().cpu().numpy())
+        elif C > 2:
+            probs = torch.softmax(logits, dim=1)        # (N, C)
+            all_probs.append(probs.detach().cpu().numpy())
+        else:
+            # 드문 케이스(스칼라 로짓)
+            probs = torch.sigmoid(logits).view(-1)
+            all_probs.append(probs.detach().cpu().numpy())
+
+        all_labels.append(labels.detach().cpu().numpy())
+
+    all_probs  = np.concatenate(all_probs, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+
+    mets = compute_metrics(all_labels, all_probs)  # ← 형태로 바이너리/멀티 자동 처리
+    mets["loss"] = total_loss / len(loader.dataset)
+    return mets, all_probs, all_labels

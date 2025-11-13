@@ -3,51 +3,75 @@ import os
 from typing import Tuple, Dict, Any, List
 from PIL import Image, ImageFile
 from torch.utils.data import Dataset
+import pandas as pd
+import numpy as np
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 CLASS_TO_DIR = {0: "Fresh_CowMeat", 1: "Spoiled_CowMeat"}
 
+# --- CSV 파일기반 데이터셋 ---
 class FileListDataset(Dataset):
-    def __init__(self, root_dir: str, csv_path: str, transform=None, img_size_fallback: int = 224):
-        import pandas as pd
+    """
+    CSV 형식: filename,label_id
+    - filename: data.root_dir 기준 상대경로 (예: "train/xxx.jpg", "valid/yyy.jpg")
+    - label_id: 0/1/2 (fresh/half-fresh/spoiled)
+    CSV에 이미 경로가 들어있으므로 CLASS_TO_DIR를 절대 쓰지 않는다.
+    """
+    def __init__(self, csv_path: str, root_dir: str, transform=None, img_size_fallback: int = 224):
         self.root = root_dir
         self.transform = transform
-        self.img_size = img_size_fallback
+        self.img_size_fallback = img_size_fallback
 
-        # robust read
-        for enc in ("utf-8", "utf-8-sig", "cp949", "euc-kr"):
-            try:
-                df = pd.read_csv(csv_path, encoding=enc)
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            df = pd.read_csv(csv_path, encoding="utf-8", encoding_errors="ignore")
+        df = pd.read_csv(csv_path)
+        # 컬럼명 정규화
+        fcol = [c for c in df.columns if c.lower() in ("filename","image","file","path")]
+        lcol = [c for c in df.columns if c.lower() in ("label_id","label","class","target")]
+        assert fcol and lcol, "CSV에는 filename, label_id 컬럼(또는 동치)이 필요합니다."
+        fcol, lcol = fcol[0], lcol[0]
 
-        assert "filename" in df.columns and "label" in df.columns, "CSV must have filename,label"
-        self.items: List[Tuple[str,int]] = []
-        for fn, y in zip(df["filename"], df["label"]):
-            y = int(y)
-            p = os.path.join(self.root, CLASS_TO_DIR[y], str(fn).strip())
-            self.items.append((p, y))
+        self.samples = []
+        for _, r in df.iterrows():
+            rel = str(r[fcol]).strip().replace("\\", "/")  # 윈도우 대비
+            lab = int(r[lcol])
+            full = os.path.join(self.root, rel)            # ← CSV 경로를 그대로 사용
+            self.samples.append((full, lab))
 
-        self.items = [(p,y) for (p,y) in self.items if os.path.isfile(p)]
-        if len(self.items) == 0:
-            print(f"[WARN] No valid items from {csv_path}")
+    def __len__(self):
+        return len(self.samples)
 
-    def __len__(self): return len(self.items)
-
-    def _dummy(self):
-        from PIL import Image as PILImage
-        return PILImage.new("RGB", (self.img_size, self.img_size), (0,0,0))
-
-    def __getitem__(self, i):
-        path, y = self.items[i]
+    def _infer_out_size(self) -> int:
+        size = self.img_size_fallback
+        tf = self.transform
         try:
-            with Image.open(path) as im:
-                im.load()
-                img = im.convert("RGB")
+            for t in getattr(tf, "transforms", []):
+                if hasattr(t, "size"):
+                    s = getattr(t, "size")
+                    if isinstance(s, int): size = s
+                    elif isinstance(s, (list, tuple)) and len(s)>0: size = s[0]
+                    break
         except Exception:
-            img = self._dummy()
-        if self.transform: img = self.transform(img)
-        return img, y, {"path": path}
+            pass
+        return size
+
+    def __getitem__(self, idx):
+        tries, cur = 3, idx
+        for _ in range(tries):
+            path, label = self.samples[cur]
+            try:
+                with Image.open(path) as im:
+                    im.load()
+                    img = im.convert("RGB")
+                if self.transform:
+                    img = self.transform(img)
+                return img, label, {"path": path}
+            except Exception as e:
+                print(f"Error loading image {path}: {e}")
+                cur = np.random.randint(0, len(self.samples))
+        # 실패 시 더미 반환
+        from PIL import Image as PILImage
+        out_size = self._infer_out_size()
+        dummy = PILImage.new("RGB", (out_size, out_size), (0,0,0))
+        if self.transform:
+            dummy = self.transform(dummy)
+        return dummy, 0, {"path": None}
+
